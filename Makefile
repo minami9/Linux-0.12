@@ -20,7 +20,7 @@ CPP	=cpp -nostdinc -Iinclude
 # This can be either FLOPPY, /dev/xxxx or empty, in which case the
 # default of /dev/hd6 is used by 'build'.
 #
-ROOT_DEV=
+ROOT_DEV=FLOPPY
 SWAP_DEV=
 
 ARCHIVES=kernel/kernel.o mm/mm.o fs/fs.o

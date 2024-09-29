@@ -46,32 +46,35 @@ SWAP_DEV = 0
 
 entry start
 start:
-	mov	ax,#BOOTSEG
+	mov	ax,#BOOTSEG 			; bootsect把自己移动到0x9000:0x0000的位置
 	mov	ds,ax
 	mov	ax,#INITSEG
 	mov	es,ax
 	mov	cx,#256
 	sub	si,si
 	sub	di,di
-	rep
-	movw
+	rep							; 重复执行cx次，每次从si复制到di一个字，每次cx减一，si和di自增
+	movw						
 	jmpi	go,INITSEG
 
 go:	mov	ax,cs		
-	mov	dx,#0xfef4	! arbitrary value >>512 - disk parm size
+	mov	dx,#0xfef4	! arbitrary value >>512 - disk parm size 
 
 	mov	ds,ax
 	mov	es,ax
-	push	ax
+	;push	ax		; 推到bios的栈里，bios的栈地址是0xffd6
 
-	mov	ss,ax		! put stack at 0x9ff00 - 12.
-	mov	sp,dx
+	mov	ss,ax		! put stack at 0x9ff00 - 12 = 0x9fef4.
+	mov	sp,dx		; 设置新栈到ss:sp = 0x9000:0xfef4 = 0x9fef4
+					; 实际上这里已经把栈段都修改了，刚刚push到bios的栈段里面的ax的值再pop出来就不对了，
+					; 所以选择注释65行的push ax，放到设置好了栈段后，再push
+					; 这是linus犯的错
+	push	ax
 /*
  *	Many BIOS's default disk parameter tables will not 
  *	recognize multi-sector reads beyond the maximum sector number
  *	specified in the default diskette parameter tables - this may
  *	mean 7 sectors in some cases.
- *
  *	Since single sector reads are slow and out of the question,
  *	we must take care of this by creating new parameter tables
  *	(for the first disk) in RAM.  We will set the maximum sector
@@ -82,16 +85,21 @@ go:	mov	ax,cs
  *	Segments are as follows: ds=es=ss=cs - INITSEG,
  *		fs = 0, gs = parameter table segment
  */
+/*
+	BIOS 设置的中断 0x1E 实际上并不是一个中断，其对应中断向量的地方被放置了软驱参数表的地址。
+	该中断向量位于内存 0x1E * 4 = 0x78 处。这段代码首先从内存 0x0000:0x0078 处指向原软驱参数表的指针，
+	然后从该指针指向的地址复制到 0x9000:0xfef4 处，然后修改表中偏移 4 处的每磁道最大扇区数为 18。
+	表长 12 字节。
+*/
 
-
-	push	#0
+	push	#0			; 置段寄存器 fs = 0
 	pop	fs
 	mov	bx,#0x78		! fs:bx is parameter table address
-	seg fs
-	lgs	si,(bx)			! gs:si is source
+	seg fs				; 指令 seg fs 表示其下一条语句的操作数在 fs 段中
+	lgs	si,(bx)			! gs:si is source ; gs:si = fs:[bx]，在0x0000:0x0078这个物理地址上去取一个地址，高16位送入gs，低16位送入si
 
 	mov	di,dx			! es:di is destination
-	mov	cx,#6			! copy 12 bytes
+	mov	cx,#6			! copy 12 bytes ; es:di = 0x9000:0xfef4
 	cld
 
 	rep
@@ -99,31 +107,33 @@ go:	mov	ax,cs
 	movw
 
 	mov	di,dx
-	movb	4(di),*18		! patch sector count
+	movb	4(di),*18		! patch sector count ;修改每个磁道的扇区数 es:di = *(0x9000:0xfef4 + 4) = 0x12
 
 	seg fs
-	mov	(bx),di
+	mov	(bx),di			; 0x0000:0x0078 = 0xfef4 修改中断向量表0x1E所存的指针为0x9000:0xfef4
 	seg fs
-	mov	2(bx),es
+	mov	2(bx),es		
 
-	pop	ax
+	pop	ax				; 弹出栈中的数据到ax中，
 	mov	fs,ax
 	mov	gs,ax
 	
 	xor	ah,ah			! reset FDC 
-	xor	dl,dl
+	xor	dl,dl			; AH = 0，DL = 0，使0号软盘复位
 	int 	0x13	
 
 ! load the setup-sectors directly after the bootblock.
 ! Note that 'es' is already set up.
+! 在 bootsect 程序块后紧根着加载 setup 模块的代码数据。
+! 注意 es 已经设置好了。（在移动代码时 es 已经指向目的段地址处 0x9000）。
 
 load_setup:
-	xor	dx, dx			! drive 0, head 0
-	mov	cx,#0x0002		! sector 2, track 0
-	mov	bx,#0x0200		! address = 512, in INITSEG
-	mov	ax,#0x0200+SETUPLEN	! service 2, nr of sectors
+	xor	dx, dx			! drive 0, head 0				; DH/DL = 磁头号/驱动器号
+	mov	cx,#0x0002		! sector 2, track 0				; CX中的0~5位代表扇区号，CX中的6~15位代表柱面号（其中，CL的6~7为柱面数的高两位，CH存低8位）
+	mov	bx,#0x0200		! address = 512, in INITSEG		; ES:BX = 数据缓冲区地址，即在bootsect后面紧跟着的扇区
+	mov	ax,#0x0200+SETUPLEN	! service 2, nr of sectors 	; 读磁盘扇区，读SETUPLEN=4，读4个扇区
 	int	0x13			! read it
-	jnc	ok_load_setup		! ok - continue
+	jnc	ok_load_setup		! ok - continue				; 都成功了跳转，读不成功打印错误后继续读
 
 	push	ax			! dump error code
 	call	print_nl
@@ -139,17 +149,37 @@ load_setup:
 ok_load_setup:
 
 ! Get disk drive parameters, specifically nr of sectors/track
+	; 假设当前ax = 00000000，bx = 00000004，cx = 00094f12，dx = 00000101，es = 0x9000，di = 0000efde
+	; bl = 4， 表示磁盘1.44M大小
+	; cl[7:6] ch = 00 0100 1111，表示最大柱面（磁道）号，那么这里的柱面数是79
+	; cl[5:0] = 1 0010，表示扇区数，那么这里的扇区数是18
+	; dh，表示最大磁头数，那么这里的最大磁头数是1，那么就有两个磁头
+	; dl，表示驱动器数量，那么这里的驱动器数量为1
+	; 计算一下这个软盘的总容量
+	; 一个1.44M的软盘，它有80个磁道，每个磁道有18个扇区，两面都可以存储数据。我们这样计算它的容量：80×18×2×512≈1440KB≈1.44MB
 
 	xor	dl,dl
 	mov	ah,#0x08		! AH=8 is get drive parameters
 	int	0x13
 	xor	ch,ch
 	seg cs
-	mov	sectors,cx
-	mov	ax,#INITSEG
+	mov	sectors,cx		; 保存扇区数到sectors标号处
+	mov	ax,#INITSEG		; 因为上面取磁盘参数0x13中断改了 es 值，这里重新改回0x9000
 	mov	es,ax
 
 ! Print some inane message
+/*
+	下面利用 BIOS INT 0x10 功能 0x03 和 0x13 来显示信息：“'Loading'+回车+换行”，显示包括
+	回车和换行控制字符在内共 9 个字符。
+	BIOS 中断 0x10 功能号 ah = 0x03，读光标位置。
+	输入：bh = 页号
+	返回：ch = 扫描开始线；cl = 扫描结束线；dh = 行号(0x00 顶端)；dl = 列号(0x00 最左边)。
+
+	BIOS 中断 0x10 功能号 ah = 0x13，显示字符串。
+	输入：al = 放置光标的方式及规定属性。0x01-表示使用 bl 中的属性值，光标停在字符串结尾处。
+	bh = 显示页面号；bl = 字符属性；dh = 行号；dl = 列号。cx = 显示的字符串字符数。
+	es:bp 此寄存器对指向要显示的字符串起始位置处。
+ */
 
 	mov	ah,#0x03		! read cursor pos
 	xor	bh,bh
@@ -163,12 +193,15 @@ ok_load_setup:
 
 ! ok, we've written the message, now
 ! we want to load the system (at 0x10000)
+	; 现在开始将 system 模块加载到 0x10000（64KB）开始处。
+	; 注意! 目前的内核系统最大长度限制为(8*65536)(512KB)字节
+	; 估计早期设计内核的时候觉得内核长度不会超过512k，所以才把system模块搬到了0x10000这个位置
 
-	mov	ax,#SYSSEG
+	mov	ax,#SYSSEG	; SYSSEG = 0x1000
 	mov	es,ax		! segment of 0x010000
-	call	read_it
-	call	kill_motor
-	call	print_nl
+	call	read_it		; 读磁盘上 system 模块，es 为输入参数。
+	call	kill_motor	; 关闭驱动器马达，这样就可以知道驱动器的状态了。
+	call	print_nl	; print new line
 
 ! After that we check which root-device to use. If the device is
 ! defined (!= 0), nothing is done and the given device is used.
