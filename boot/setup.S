@@ -38,23 +38,33 @@ start:
 	mov	ds,ax
 
 ! Get memory size (extended mem, kB)
-
-	mov	ah,#0x88
+; 取扩展内存的大小值（KB）。
+; 利用 BIOS 中断 0x15 功能号 ah = 0x88 取系统所含扩展内存大小并保存在内存 0x90002 处。
+; 返回：ax = 从 0x100000（1M）处开始的扩展内存大小(KB)。若出错则 CF 置位，ax = 出错码。
+; cf为0的情况下， ax即为获取到的内存大小，单位1KB，所以实际内存大小=ax*1024 + 1MB
+	mov	ah,#0x88	; 读取扩展内存大小
 	int	0x15
-	mov	[2],ax
+	mov	[2],ax		; 把ax代表的扩展内存的值存入0x9000:0x0002的位置
 
 ! check for EGA/VGA and some config parameters
+; 检查显示方式（EGA/VGA）并取参数。
+; 调用 BIOS 中断 0x10 功能号 0x12（视频子系统配置）取 EBA 配置信息。
+; ah = 0x12，bl = 0x10 - 取 EGA 配置信息。
+; 返回：
+; bh = 显示状态(0x00 -彩色模式，I/O 端口=0x3dX； 0x01 -单色模式，I/O 端口=0x3bX)。
+; bl = 安装的显示内存(0x00 - 64k；0x01 - 128k；0x02 - 192k；0x03 = 256k。)
+; cx = 显示卡特性参数(参见程序后对 BIOS 视频中断 0x10 的说明)。
 
 	mov	ah,#0x12
 	mov	bl,#0x10
 	int	0x10
-	mov	[8],ax
-	mov	[10],bx
-	mov	[12],cx
-	mov	ax,#0x5019
-	cmp	bl,#0x10
+	mov	[8],ax		; 未知
+	mov	[10],bx		; bh = 0x00, bl = 0x03 彩色模式，端口=0x3dX，显存256k
+	mov	[12],cx		; ch = 0x00, 特性线状态，cl = 0x09 EGA + 80x25
+	mov	ax,#0x5019	; 在 ax 中预置屏幕默认行列值（ah = 80 列；al=25 行）
+	cmp	bl,#0x10	; 若中断返回 bl 值为 0x10，则表示不是 VGA 显示卡，跳转
 	je	novga
-	call	chsvga
+	call	chsvga	; 检测显示卡厂家和类型，修改显示行列值（第 215 行）
 novga:	mov	[14],ax
 	mov	ah,#0x03	! read cursor pos
 	xor	bh,bh
@@ -211,7 +221,12 @@ empty_8042:
 ! Routine trying to recognize type of SVGA-board present (if any)
 ! and if it recognize one gives the choices of resolution it offers.
 ! If one is found the resolution chosen is given by al,ah (rows,cols).
-
+; 下面是用于识别 SVGA 显示卡（若有的话）的子程序。若识别出一块就向用户
+; 提供选择分辨率的机会，并把分辨率放入寄存器 al、ah（行、列）中返回。
+; 
+; 下面首先显示 588 行上的 msg1 字符串（"按<回车键>查看存在的 SVGA 模式，或按任意键继续"），
+; 然后循环读取键盘控制器输出缓冲器，等待用户按键。如果用户按下回车键就去检查系统具有
+; 的 SVGA 模式，并在 AL 和 AH 中返回最大行列值，否则设置默认值 AL=25 行、AH=80 列并返回。
 chsvga:	cld
 	push	ds
 	push	cs
