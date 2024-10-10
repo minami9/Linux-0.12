@@ -38,44 +38,70 @@ start:
 	mov	ds,ax
 
 ! Get memory size (extended mem, kB)
-
-	mov	ah,#0x88
+; 取扩展内存的大小值（KB）。
+; 利用 BIOS 中断 0x15 功能号 ah = 0x88 取系统所含扩展内存大小并保存在内存 0x90002 处。
+; 返回：ax = 从 0x100000（1M）处开始的扩展内存大小(KB)。若出错则 CF 置位，ax = 出错码。
+; cf为0的情况下， ax即为获取到的内存大小，单位1KB，所以实际内存大小=ax*1024 + 1MB
+	mov	ah,#0x88	; 读取扩展内存大小
 	int	0x15
-	mov	[2],ax
+	mov	[2],ax		; 把ax代表的扩展内存的值存入0x9000:0x0002的位置
 
 ! check for EGA/VGA and some config parameters
+; 检查显示方式（EGA/VGA）并取参数。
+; 调用 BIOS 中断 0x10 功能号 0x12（视频子系统配置）取 EBA 配置信息。
+; ah = 0x12，bl = 0x10 - 取 EGA 配置信息。
+; 返回：
+; bh = 显示状态(0x00 -彩色模式，I/O 端口=0x3dX； 0x01 -单色模式，I/O 端口=0x3bX)。
+; bl = 安装的显示内存(0x00 - 64k；0x01 - 128k；0x02 - 192k；0x03 = 256k。)
+; cx = 显示卡特性参数(参见程序后对 BIOS 视频中断 0x10 的说明)。
 
 	mov	ah,#0x12
 	mov	bl,#0x10
 	int	0x10
-	mov	[8],ax
-	mov	[10],bx
-	mov	[12],cx
-	mov	ax,#0x5019
-	cmp	bl,#0x10
+	mov	[8],ax		; 未知
+	mov	[10],bx		; bh = 0x00, bl = 0x03 彩色模式，端口=0x3dX，显存256k
+	mov	[12],cx		; ch = 0x00, 特性线状态，cl = 0x09 EGA + 80x25
+	mov	ax,#0x5019	; 在 ax 中预置屏幕默认行列值（ah = 80 列；al=25 行）
+	cmp	bl,#0x10	; 若中断返回 bl 值为 0x10，则表示不是 VGA 显示卡，跳转
 	je	novga
-	call	chsvga
-novga:	mov	[14],ax
+	call	chsvga	; 检测显示卡厂家和类型，修改显示行列值（第 215 行）
+
+; 使用 BIOS 中断 0x10 功能 0x03 取屏幕当前光标位置，并保存在内存 0x90000 处（2 字节）。
+; 控制台初始化程序 console.c 会到此处读取该值。
+; BIOS 中断 0x10 功能号 ah = 0x03，读光标位置。
+; 输入：bh = 页号
+; 返回：ch = 扫描开始线；cl = 扫描结束线；dh = 行号(0x00 顶端)；dl = 列号(0x00 最左边)。
+novga:	mov	[14],ax	; 存储屏幕行列数
 	mov	ah,#0x03	! read cursor pos
 	xor	bh,bh
 	int	0x10		! save it in known place, con_init fetches
-	mov	[0],dx		! it from 0x90000.
-	
+	mov	[0],dx		! it from 0x90000. ; dh=0x16 行 dl=0x00 列
+
 ! Get video-card data:
-	
+; 下面这段用于取显示卡当前显示模式。
+; 调用 BIOS 中断 0x10，功能号 ah = 0x0f。
+; 返回：ah = 字符列数；al = 显示模式；bh = 当前显示页。
+; 0x90004(1 字)存放当前页；0x90006 存放显示模式；0x90007 存放字符列数。
 	mov	ah,#0x0f
 	int	0x10
-	mov	[4],bx		! bh = display page
-	mov	[6],ax		! al = video mode, ah = window width
+	mov	[4],bx		! bh = display page ; bh = 0x00 0页
+	mov	[6],ax		! al = video mode, ah = window width ; al = 0x03 ah = 0x50 字符列数
 
 ! Get hd0 data
-
+; 取第一个硬盘的信息（复制硬盘参数表）。
+; 第 1 个硬盘参数表的首地址竟然是中断 0x41 的中断向量值！而第 2 个硬盘参数表紧接在第 1 个
+; 表的后面，中断 0x46 的向量向量值也指向第 2 个硬盘的参数表首址。表的长度是 16 个字节。
+; 下面两段程序分别复制 ROM BIOS 中有关两个硬盘参数表到：0x90080 处存放第 1 个硬盘的表，
+; 0x90090 处存放第 2 个硬盘的表。
+; 从内存指定位置处读取一个长指针值，并放入 ds 和 si 寄存器。ds 中放段地址，
+; si 是段内偏移地址。这里是把内存地址 4 * 0x41（= 0x104）处保存的 4 个字节读出。
+; 这 4 字节即是硬盘参数表所处位置的段和偏移值。
 	mov	ax,#0x0000
 	mov	ds,ax
 	lds	si,[4*0x41]
 	mov	ax,#INITSEG
 	mov	es,ax
-	mov	di,#0x0080
+	mov	di,#0x0080		; 存到0x90080
 	mov	cx,#0x10
 	rep
 	movsb
@@ -87,13 +113,17 @@ novga:	mov	[14],ax
 	lds	si,[4*0x46]
 	mov	ax,#INITSEG
 	mov	es,ax
-	mov	di,#0x0090
+	mov	di,#0x0090		; 存到0x90090
 	mov	cx,#0x10
 	rep
 	movsb
 
 ! Check that there IS a hd1 :-)
-
+; 检查系统是否有第 2 个硬盘。如果没有则把第 2 个表清零。
+; 利用 BIOS 中断调用 0x13 的取盘类型功能，功能号 ah = 0x15；
+; 输入：dl = 驱动器号（0x8X 是硬盘：0x80 指第 1 个硬盘，0x81 第 2 个硬盘）
+; 输出：ah = 类型码；00 - 没有这个盘，CF 置位；01 - 是软驱，没有 change-line 支持；
+; 02 - 是软驱(或其他可移动设备)，有 change-line 支持； 03 - 是硬盘。
 	mov	ax,#0x01500
 	mov	dl,#0x81
 	int	0x13
@@ -111,28 +141,46 @@ no_disk1:
 is_disk1:
 
 ! now we want to move to protected mode ...
+; 现在我们要进入保护模式中了...
 
-	cli			! no interrupts allowed !
+	cli			! no interrupts allowed ; 关中断
 
 ! first we move the system to it's rightful place
+; 首先我们将 system 模块移到正确的位置。
+; bootsect 引导程序会把 system 模块读入到内存 0x10000（64KB）开始的位置。由于当时假设
+; system 模块最大长度不会超过 0x80000（512KB），即其末端不会超过内存地址 0x90000，所以
+; bootsect 会把自己移动到 0x90000 开始的地方，并把 setup 加载到它的后面。下面这段程序的
+; 用途是再把整个 system 模块移动到 0x00000 位置，即把从 0x10000 到 0x8ffff 的内存数据块
+; （512KB）整块地向内存低端移动了 0x10000（64KB）字节。
 
 	mov	ax,#0x0000
 	cld			! 'direction'=0, movs moves forward
 do_move:
-	mov	es,ax		! destination segment
-	add	ax,#0x1000
-	cmp	ax,#0x9000
+	mov	es,ax		! destination segment ; es:di = 0x0000:0x0000
+	add	ax,#0x1000	; ax = 0x1000
+	cmp	ax,#0x9000	; 
 	jz	end_move
-	mov	ds,ax		! source segment
-	sub	di,di
+	mov	ds,ax		! source segment ; ds:si = 0x1000:0x0000
+	sub	di,di		
 	sub	si,si
-	mov 	cx,#0x8000
+	mov 	cx,#0x8000	; 移动 0x8000 字（64KB 字节），每次移动这么多，直到移动了512k
 	rep
 	movsw
 	jmp	do_move
 
 ! then we load the segment descriptors
-
+; 此后，我们加载段描述符。
+; 从这里开始会遇到 32 位保护模式的操作。有关这方面的信息请参阅第 4 章。在进入保护模式
+; 中运行之前，我们需要首先设置好需要使用的段描述符表。这里需要设置全局描述符表 GDT 和
+; 中断描述符表 IDT。下面指令 LIDT 用于加载中断描述符表寄存器。它的操作数（idt_48）有
+; 6 字节。前 2 字节(字节 0-1）是描述符表的字节长度值；后 4 字节（字节 2-5）是描述符表的
+; 32 位线性基地址，其形式参见下面 580--586 行说明。中断描述符表中的每一个 8 字节表项指
+; 出发生中断时需要调用的代码信息。与中断向量有些相似，但要包含更多的信息。
+;
+; LGDT 指令用于加载全局描述符表寄存器，其操作数格式与 LIDT 指令的相同。全局描述符表中
+; 的每个描述符项（8 字节）描述了保护模式下数据段和代码段（块）的信息。 其中包括段的
+; 最大长度限制（16 位）、段的线性地址基址（32 位）、段的特权级、段是否在内存、读写许可
+; 权以及其他一些保护模式运行的标志。参见后面 567--578 行。
 end_move:
 	mov	ax,#SETUPSEG	! right, forgot this at first. didn't work :-)
 	mov	ds,ax
@@ -211,8 +259,13 @@ empty_8042:
 ! Routine trying to recognize type of SVGA-board present (if any)
 ! and if it recognize one gives the choices of resolution it offers.
 ! If one is found the resolution chosen is given by al,ah (rows,cols).
-
-chsvga:	cld
+; 下面是用于识别 SVGA 显示卡（若有的话）的子程序。若识别出一块就向用户
+; 提供选择分辨率的机会，并把分辨率放入寄存器 al、ah（行、列）中返回。
+; 
+; 下面首先显示 588 行上的 msg1 字符串（"按<回车键>查看存在的 SVGA 模式，或按任意键继续"），
+; 然后循环读取键盘控制器输出缓冲器，等待用户按键。如果用户按下回车键就去检查系统具有
+; 的 SVGA 模式，并在 AL 和 AH 中返回最大行列值，否则设置默认值 AL=25 行、AH=80 列并返回。
+chsvga:	cld				; 操作方向标志位Direction Flag, DF
 	push	ds
 	push	cs
 	pop	ds
